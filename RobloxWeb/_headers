@@ -1,0 +1,38 @@
+/*
+  Cross-origin isolation headers for static hosts that support them
+  (Netlify / Cloudflare Pages style `_headers`).
+
+  The Roblox WebClient transfers SharedArrayBuffer to Web Workers, which is
+  only permitted when the document is cross-origin isolated. That requires
+  COOP: same-origin + COEP: credentialless on every HTML document.
+*/
+/*
+  Cross-Origin-Opener-Policy: same-origin
+  Cross-Origin-Embedder-Policy: credentialless
+  Cross-Origin-Resource-Policy: cross-origin
+  X-Content-Type-Options: nosniff
+  Permissions-Policy: cross-origin-isolated=(self)
+
+/assets/*
+  Cross-Origin-Resource-Policy: cross-origin
+  Access-Control-Allow-Origin: *
+
+/*.wasm
+  Content-Type: application/wasm
+  Cross-Origin-Resource-Policy: cross-origin
+  Access-Control-Allow-Origin: *
+
+/*.js
+  Content-Type: text/javascript; charset=utf-8
+  Cross-Origin-Resource-Policy: cross-origin
+  Access-Control-Allow-Origin: *
+
+/*.json
+  Content-Type: application/json; charset=utf-8
+  Cross-Origin-Resource-Policy: cross-origin
+  Access-Control-Allow-Origin: *
+
+/*.rbxm
+  Content-Type: application/octet-stream
+  Cross-Origin-Resource-Policy: cross-origin
+  Access-Control-Allow-Origin: *

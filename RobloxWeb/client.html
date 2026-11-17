@@ -1,0 +1,771 @@
+<!DOCTYPE html>
+<html>
+    <head>
+        <meta charSet="utf-8" data-next-head=""/>
+        <meta name="viewport" content="width=device-width" data-next-head=""/>
+        <title data-next-head="">Roblox Web Experience</title>
+        <meta name="robots" content="noindex" data-next-head=""/>
+        <!-- Build stamp: confirms which copy of this file the browser loaded.
+             If DevTools shows an older value you are looking at a cached file. -->
+        <meta name="rbx-build" content="2026-11-03-join-diagnostics"/>
+        <script>console.log("[rbx] client.html build 2026-11-03-join-diagnostics");</script>
+        <!--RBX_SESSION-->
+        <script>
+            // Gate the engine on a verified account. Without a session the
+            // join endpoint always refuses, so send the user back to the
+            // login screen instead of showing a dead loading screen.
+            (function () {
+                try {
+                    var s = window.__RBX_SESSION || {};
+                    var q = new URLSearchParams(location.search);
+                    if (q.has("guest")) return;
+                    var saved = "";
+                    try { saved = localStorage.getItem("robloxweb.cookie") || ""; } catch (e) {}
+                    // A cookie on the server counts too: it may still be
+                    // validating, and bouncing back to the login screen would
+                    // loop. Only send the user away when there is no session at
+                    // all.
+                    if (!s.authenticated && !s.cookie && !saved) location.replace("./index.html");
+                } catch (e) {}
+            })();
+        </script>
+        <!--
+          Cross-origin isolation bootstrap. If the host already sends
+          COOP/COEP this is a no-op; otherwise it installs a service worker
+          that adds them and reloads once, so SharedArrayBuffer can be
+          transferred to the WebClient workers.
+        -->
+        <script>
+            /*
+              Same-origin API proxy configuration.
+
+              client.html and WasmPlayer.js both expect window.__rbxConfig
+              (normally supplied by rbx-config.js, which is not part of this
+              package). Roblox's APIs answer 404/403 to any request carrying a
+              foreign Origin header, so the engine cannot call them straight
+              from this page. server.js exposes /api/p?url=<encoded> which
+              re-issues the request server-side with the stored session and
+              returns it same-origin.
+            */
+            window.__rbxConfig = {
+                proxyUrl: "/api/p",
+                proxify: function (target) {
+                    return "/api/p?url=" + encodeURIComponent(target);
+                },
+                // server.js injects the session cookie itself, so the page
+                // must not (and cannot) send credentials of its own.
+                authHeaders: function () { return {}; },
+                cookie: (window.__RBX_SESSION && window.__RBX_SESSION.cookie) || ""
+            };
+        </script>
+        <script>
+            /*
+              Route the engine's own HTTP through the server.
+
+              The wasm engine (WebClient.js) does its networking from inside the
+              page, so every call it makes to apis/users/games/economy/
+              thumbnails/assetdelivery/clientsettings.roblox.com goes out as a
+              cross-origin browser request carrying this page's Origin header.
+              Roblox answers 404 to any Origin it does not recognise (verified:
+              the same URL returns 200 with no Origin, 404 with one), which is
+              what surfaced as
+
+                HttpError: Unknown url: https://apis.roblox.com/...
+                [LIFECYCLE] joinGameFailed
+                Error Code: 529
+
+              server.js already exposes /api/p?url=<encoded> which re-issues the
+              request server-side (no Origin header) and attaches the stored
+              session cookie, retrying once with a fresh X-CSRF-Token. Rewriting
+              fetch and XMLHttpRequest here means the engine never has to know.
+
+              setup.rbxcdn.com is deliberately NOT proxied: it is the 95 MB
+              engine binary host, it already sends Access-Control-Allow-Origin
+              and Cross-Origin-Resource-Policy, and streaming it through a
+              buffering proxy would be wasteful.
+            */
+            (function () {
+                "use strict";
+                var PROXY = "/api/p?url=";
+                var HOSTS = [".roblox.com", ".rbxcdn.com", ".robloxlabs.com"];
+                var SKIP = ["setup.rbxcdn.com", "play.roblox.com"];
+
+                function shouldProxy(u) {
+                    var url;
+                    try { url = new URL(u, location.href); } catch (e) { return false; }
+                    if (url.origin === location.origin) return false;
+                    if (url.protocol !== "https:" && url.protocol !== "http:") return false;
+                    var h = url.hostname.toLowerCase();
+                    for (var i = 0; i < SKIP.length; i++) {
+                        if (h === SKIP[i] || h.endsWith("." + SKIP[i])) return false;
+                    }
+                    for (var j = 0; j < HOSTS.length; j++) {
+                        if (h === HOSTS[j].slice(1) || h.endsWith(HOSTS[j])) return true;
+                    }
+                    return false;
+                }
+
+                function proxify(u) {
+                    return PROXY + encodeURIComponent(new URL(u, location.href).href);
+                }
+
+                // ---- fetch ----
+                var nativeFetch = window.fetch;
+                if (nativeFetch) {
+                    window.fetch = function (input, init) {
+                        try {
+                            var url = typeof input === "string" ? input : (input && input.url);
+                            if (url && shouldProxy(url)) {
+                                /*
+                                 * The engine's "am I signed in?" probe.
+                                 *
+                                 * Both the /games/start chunk and WasmPlayer.js
+                                 * do:
+                                 *     fetch("https://users.roblox.com/v1/users/authenticated")
+                                 *     if (!resp.ok) location.href = "https://www.roblox.com/login"
+                                 *
+                                 * That is a full-page navigation off this app. When
+                                 * there is no session we make the call reject
+                                 * instead: both call sites wrap it in try/catch and
+                                 * merely warn, so the engine stays put and our own
+                                 * sign-in panel explains what to do. With a real
+                                 * session the probe is proxied normally and
+                                 * returns 200, so the engine proceeds to join.
+                                 */
+                                if (/\/v1\/users\/authenticated(\?|$)/.test(url)) {
+                                    var s = window.__RBX_SESSION || {};
+                                    if (!(s.authenticated || s.cookie)) {
+                                        if (window.__rbxNeedLogin) window.__rbxNeedLogin();
+                                        return Promise.reject(new TypeError("Failed to fetch"));
+                                    }
+                                }
+                                var opts = Object.assign({}, init || {});
+                                // The proxy supplies the cookie and headers.
+                                delete opts.credentials;
+                                if (input instanceof Request && !init) {
+                                    opts.method = input.method;
+                                    opts.body = input.body;
+                                    opts.headers = input.headers;
+                                }
+                                return nativeFetch.call(this, proxify(url), opts);
+                            }
+                        } catch (e) {}
+                        return nativeFetch.apply(this, arguments);
+                    };
+                }
+
+                // ---- XMLHttpRequest (emscripten falls back to it) ----
+                var nativeOpen = XMLHttpRequest.prototype.open;
+                XMLHttpRequest.prototype.open = function (method, url) {
+                    var target = url;
+                    try {
+                        if (url && shouldProxy(url)) {
+                            target = proxify(url);
+                            this.__rbxProxied = true;
+                        }
+                    } catch (e) {}
+                    var args = Array.prototype.slice.call(arguments);
+                    args[1] = target;
+                    return nativeOpen.apply(this, args);
+                };
+            })();
+        </script>
+        <script src="./coi-serviceworker.js"></script>
+        <link rel="icon" type="image/svg+xml" href="https://play.roblox.com/038e4bd621bee962e64ed84fac16608407267adc/assets/favicon.svg" data-next-head=""/>
+        <script>
+            // Dev settings hook consumed by WasmPlayer.js (window.__wasmDevSettings).
+            // Used to supply flag overrides for this self-hosted deployment.
+            window.__wasmDevSettings = {
+                // Must be non-empty: WasmPlayer redirects to WasmSettings.html when
+                // authCookie === "" and no cookie-pool lease is available, which on
+                // this page becomes an infinite self-redirect.
+                // "GUEST" keeps the page alive; a real .ROBLOSECURITY value is
+                // required for gamejoin to accept a join request.
+                authCookie: (function () {
+                    /*
+                     * The engine needs the real .ROBLOSECURITY to join. Read it
+                     * from every place it can live, in order of freshness:
+                     *
+                     *   1. the session server.js injected into this page
+                     *   2. the cookie the login screen stored in localStorage
+                     *      (this survives a page that was served *before* the
+                     *      session was detected, which is exactly how a join
+                     *      ends up anonymous and Roblox answers status 12)
+                     *   3. the value the launcher put on __rbxConfig
+                     *
+                     * "GUEST" is only the last resort: WasmPlayer redirects to
+                     * WasmSettings.html when this is empty, so it must never be
+                     * "".
+                     */
+                    var c = (window.__RBX_SESSION && window.__RBX_SESSION.cookie) ||
+                        (window.__rbxConfig && window.__rbxConfig.cookie) || "";
+                    if (!c) {
+                        try { c = localStorage.getItem("robloxweb.cookie") || ""; } catch (e) {}
+                    }
+                    return c || "GUEST";
+                })(),
+                isCookieFromPool: function () { return false; },
+                setAuthCookie: function () {},
+                allocateCookieFromPool: function () { return null; },
+                // The loading screen's metadata lookups (economy / apis / locale /
+                // thumbnails) are cross-origin and CORS-blocked. Route them through
+                // whatever proxy the page configured (rbx-config.js auto-detects
+                // server.js's same-origin /api). Resolved at call time so an
+                // asynchronously detected proxy still applies.
+                apiProxy: {
+                    url: function (target) {
+                        var c = window.__rbxConfig;
+                        return c && c.proxyUrl ? c.proxify(target) : target;
+                    },
+                    authHeaders: function () {
+                        var c = window.__rbxConfig;
+                        return c ? c.authHeaders() : {};
+                    }
+                },
+                getFlagOverrides: function () {
+                    return {
+                        FFlagDebugSkipOtaPatchVerification: "True",
+                        FFlagDebugSkipPostTtiSignatureVerification: "True"
+                    };
+                }
+            };
+        </script>
+        <link rel="preload" href="https://play.roblox.com/038e4bd621bee962e64ed84fac16608407267adc/_next/static/css/013764c92c3496c2.css" as="style"/>
+        <link rel="stylesheet" href="https://play.roblox.com/038e4bd621bee962e64ed84fac16608407267adc/_next/static/css/013764c92c3496c2.css" data-n-g=""/>
+        <noscript data-n-css=""></noscript>
+        <!--
+          The remote stylesheet declares its @font-face sources as root-relative
+          paths (/038e4.../assets/loading/*.otf). Loaded from play.roblox.com
+          those fonts are cross-origin, and fonts always require CORS, so the
+          browser refused them. These identical @font-face rules point at the
+          same-origin proxy instead, which server.js forwards to
+          play.roblox.com and re-serves with permissive headers.
+        -->
+        <style data-rbx-font-proxy>
+            @font-face{font-family:"Builder Sans";src:url("/api/p?url=https%3A%2F%2Fplay.roblox.com%2F038e4bd621bee962e64ed84fac16608407267adc%2Fassets%2Floading%2FBuilderSans-Regular.otf") format("opentype");font-weight:400;font-display:block}
+            @font-face{font-family:"Builder Sans";src:url("/api/p?url=https%3A%2F%2Fplay.roblox.com%2F038e4bd621bee962e64ed84fac16608407267adc%2Fassets%2Floading%2FBuilderSans-Medium.otf") format("opentype");font-weight:500;font-display:block}
+            @font-face{font-family:"Builder Sans";src:url("/api/p?url=https%3A%2F%2Fplay.roblox.com%2F038e4bd621bee962e64ed84fac16608407267adc%2Fassets%2Floading%2FBuilderSans-Bold.otf") format("opentype");font-weight:700;font-display:block}
+            @font-face{font-family:"Source Sans Pro";src:url("/api/p?url=https%3A%2F%2Fplay.roblox.com%2F038e4bd621bee962e64ed84fac16608407267adc%2Fassets%2Floading%2FSourceSansPro-Regular.ttf") format("truetype");font-weight:400;font-display:block}
+            @font-face{font-family:"Source Sans Pro";src:url("/api/p?url=https%3A%2F%2Fplay.roblox.com%2F038e4bd621bee962e64ed84fac16608407267adc%2Fassets%2Floading%2FSourceSansPro-Semibold.ttf") format("truetype");font-weight:600;font-display:block}
+        </style>
+        <script defer="" nomodule="" src="https://play.roblox.com/038e4bd621bee962e64ed84fac16608407267adc/_next/static/chunks/polyfills-42372ed130431b0a.js"></script>
+        <script>
+            /*
+              Engine bootstrap.
+
+              The Next.js chunks are loaded straight from play.roblox.com, in
+              the exact order the real page uses (webpack runtime first, then
+              framework, main, _app, the /games/start page chunk, then the two
+              manifests). They are injected here, after the auth preflight,
+              rather than as static <script> tags, so the engine never boots
+              for a session Roblox will refuse.
+
+              COEP note: this page is cross-origin isolated (COOP same-origin +
+              COEP credentialless) because the WebClient transfers a
+              SharedArrayBuffer to its workers. Under "require-corp" a
+              cross-origin <script> is refused unless the response carries
+              Cross-Origin-Resource-Policy or CORS; Roblox's bucket sends
+              neither, which produced
+                ERR_BLOCKED_BY_RESPONSE.NotSameOriginAfterDefaultedToSameOriginByCoep
+              one script at a time. "credentialless" keeps
+              self.crossOriginIsolated === true but does not block these.
+            */
+            (function () {
+                "use strict";
+                var ORIGIN = "https://play.roblox.com";
+                var PREFIX = "/038e4bd621bee962e64ed84fac16608407267adc/_next/static/";
+                var CHUNKS = [
+                    PREFIX + "chunks/webpack-e0bb929a25869d53.js",
+                    PREFIX + "chunks/framework-a6e0b7e30f98059a.js",
+                    PREFIX + "chunks/main-659e7f080afa74df.js",
+                    PREFIX + "chunks/pages/_app-e6353f9ec2821d4a.js",
+                    PREFIX + "chunks/pages/games/start-59a2c24f923806d3.js",
+                    PREFIX + "oZ8_CY33a0v3QcT39qLGB/_buildManifest.js",
+                    PREFIX + "oZ8_CY33a0v3QcT39qLGB/_ssgManifest.js"
+                ];
+
+                function inject(src, timeoutMs) {
+                    return new Promise(function (resolve, reject) {
+                        var s = document.createElement("script");
+                        var settled = false;
+                        var timer = setTimeout(function () {
+                            if (settled) return;
+                            settled = true;
+                            s.remove();
+                            reject(new Error("timed out loading " + src));
+                        }, timeoutMs || 12000);
+                        s.src = src;
+                        s.async = false;
+                        s.defer = false;
+                        // no-cors on purpose: Roblox sends no
+                        // Access-Control-Allow-Origin, so crossOrigin="anonymous"
+                        // would fail even though the file is publicly readable.
+                        s.onload = function () {
+                            if (settled) return;
+                            settled = true;
+                            clearTimeout(timer);
+                            resolve();
+                        };
+                        s.onerror = function () {
+                            if (settled) return;
+                            settled = true;
+                            clearTimeout(timer);
+                            reject(new Error("failed to load " + src));
+                        };
+                        document.head.appendChild(s);
+                    });
+                }
+
+                function loadScript(path) {
+                    var absolute = ORIGIN + path;
+                    // 1) Direct from play.roblox.com (works under COEP credentialless).
+                    return inject(absolute, 12000).catch(function () {
+                        // 2) Same-origin proxy hop, for hosts that force require-corp.
+                        console.warn("[preflight] direct load blocked, retrying via proxy: " + absolute);
+                        return inject("/api/p?url=" + encodeURIComponent(absolute), 18000);
+                    });
+                }
+
+                /*
+                  The /games/start chunk hardcodes an engine version into
+                  localStorage and then injects WasmLoader.js. WasmLoader asks
+                  clientsettings.roblox.com for the live version, but that call
+                  is CORS-blocked from the browser, so it trusts the hardcoded
+                  one — which is stale, and the CDN answers 403, so the engine
+                  never boots ("Failed to load engine").
+
+                  Two defences:
+                    1. Ask our own server for the live version and pin it on
+                       robloxWasmHostConfig.engineVersion before the chunk runs.
+                    2. Trap the assignment, so anything the chunk writes is
+                       augmented with that version even if we raced it.
+                */
+                function installHostConfigTrap() {
+                    var cfg;
+                    try {
+                        Object.defineProperty(window, "robloxWasmHostConfig", {
+                            configurable: true,
+                            get: function () { return cfg; },
+                            set: function (v) {
+                                if (v && v.engineVersion === undefined && window.__RBX_ENGINE_VERSION) {
+                                    v.engineVersion = window.__RBX_ENGINE_VERSION;
+                                }
+                                cfg = v;
+                            }
+                        });
+                    } catch (e) { /* already defined: fine */ }
+                }
+
+                function fetchEngineVersion() {
+                    return fetch("/api/engine-version", { cache: "no-store" })
+                        .then(function (r) { return r.ok ? r.json() : null; })
+                        .then(function (j) {
+                            if (!j || !j.clientVersionUpload) {
+                                throw new Error("Roblox did not return a WebClient version");
+                            }
+                            window.__RBX_ENGINE_VERSION = j.clientVersionUpload;
+                            // Overwrite the stale seed the chunk leaves behind.
+                            try {
+                                localStorage.setItem("clientVersion_prod", JSON.stringify({
+                                    clientVersionUpload: j.clientVersionUpload,
+                                    version: j.version || "",
+                                    channelName: "",
+                                    cachedAt: Date.now()
+                                }));
+                            } catch (e) {}
+                            console.log("[preflight] engine version " + j.clientVersionUpload);
+                        })
+                        .catch(function (e) {
+                            console.warn("[preflight] engine version lookup failed", e);
+                            throw e;
+                        });
+                }
+
+                function boot() {
+                    function start() {
+                        installHostConfigTrap();
+                        // Resolve the version before the page chunk that boots
+                        // the engine, so it is already pinned when it runs.
+                        var beforePageChunk = CHUNKS.length - 3; // up to _app
+                        CHUNKS.reduce(function (p, src, i) {
+                            return p.then(function () {
+                                if (i === beforePageChunk) return fetchEngineVersion();
+                            }).then(function () { return loadScript(src); });
+                        }, Promise.resolve()).catch(function (e) {
+                            console.error("[preflight] engine load failed", e);
+                            showBlocked(
+                                "Could not connect to the Roblox client",
+                                "The WebClient resources did not finish loading, so the game client could not start.",
+                                "Check that the local server is running and your internet connection is available, then retry.",
+                                "CLIENT_CONNECTION_FAILED"
+                            );
+                        });
+                    }
+                    // The engine chunks expect the DOM (canvas, overlay) to exist.
+                    if (document.readyState === "loading") {
+                        document.addEventListener("DOMContentLoaded", start, { once: true });
+                    } else {
+                        start();
+                    }
+                }
+
+                function showBlocked(title, message, remedy, code) {
+                    var lo = document.getElementById("loading-overlay");
+                    if (lo) lo.style.display = "none";
+                    var overlay = document.createElement("div");
+                    overlay.id = "rbx-preflight-block";
+                    overlay.setAttribute("role", "alertdialog");
+                    overlay.style.cssText = [
+                        "position:fixed", "inset:0", "z-index:2147483647",
+                        "display:flex", "align-items:center", "justify-content:center",
+                        "background:rgba(10,12,18,.92)", "backdrop-filter:blur(6px)",
+                        "font-family:system-ui,-apple-system,'Segoe UI',sans-serif",
+                        "color:#e8ecf4", "padding:24px"
+                    ].join(";");
+                    overlay.innerHTML =
+                        '<div style="max-width:520px;width:100%;background:#161a23;border:1px solid #2a3140;border-radius:14px;padding:26px 26px 22px;box-shadow:0 24px 60px rgba(0,0,0,.55)">' +
+                          '<div style="font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:#ff8fa0;font-weight:700;margin-bottom:10px">' + (code || "Cannot join") + '</div>' +
+                          '<h1 style="margin:0 0 10px;font-size:21px;font-weight:700;line-height:1.3">' + title + '</h1>' +
+                          '<p style="margin:0 0 8px;color:#aab4c6;font-size:13.5px;line-height:1.65">' + message + '</p>' +
+                          (remedy ? '<p style="margin:0 0 18px;color:#8f9aad;font-size:12.5px;line-height:1.6">' + remedy + '</p>' : "") +
+                          '<div style="display:flex;gap:10px;flex-wrap:wrap">' +
+                            '<a href="./index.html" style="flex:1;min-width:150px;text-align:center;text-decoration:none;background:#00b06f;color:#04120c;font-weight:700;padding:11px 16px;border-radius:9px;font-size:13.5px">Go to login</a>' +
+                            '<button id="rbx-pf-retry" style="flex:1;min-width:120px;background:transparent;border:1px solid #2a3140;color:#cfd6e4;padding:11px 16px;border-radius:9px;font-size:13.5px;cursor:pointer">Retry</button>' +
+                          '</div>' +
+                        '</div>';
+                    (document.body || document.documentElement).appendChild(overlay);
+                    var r = document.getElementById("rbx-pf-retry");
+                    if (r) r.addEventListener("click", function () { location.reload(); });
+                }
+
+                /*
+                 * The /games/start chunk normally does
+                 *     window.location.replace("https://www.roblox.com/login")
+                 * when its auth probe returns 401. That throws the user out of
+                 * this app entirely. server.js rewrites that fragment to call
+                 * this hook instead, so the failure stays on-screen and points
+                 * at the local login page.
+                 */
+                window.__rbxNeedLogin = function () {
+                    showBlocked(
+                        "Roblox needs you to sign in",
+                        "The engine asked Roblox who is signed in and got 401 Unauthorized, so it stopped before loading the game.",
+                        "Open the login screen, sign in, then launch the experience again.",
+                        "SIGN_IN_REQUIRED"
+                    );
+                };
+
+                /*
+                 * Wait until React has actually hydrated #__next.
+                 *
+                 * React 18 attaches __reactContainer$<id> (and __reactFiber$<id>
+                 * on the children) to the root container during hydration. Until
+                 * that key exists, the markup in #__next is still the static
+                 * HTML from this file, and ANY change to it makes hydration
+                 * fail with error #418 ("server HTML did not match the client")
+                 * followed by #423 ("the whole root switched to client
+                 * rendering"). React then throws our change away anyway, so
+                 * writing early is both destructive and pointless.
+                 *
+                 * Poll for the marker, then run the callback. If the engine
+                 * never hydrates (chunk blocked, offline), the callback is
+                 * dropped rather than risking a mismatch.
+                 */
+                function whenHydrated(cb) {
+                    var tries = 0;
+                    (function poll() {
+                        var root = document.getElementById("__next");
+                        if (root) {
+                            var keys = Object.keys(root);
+                            for (var i = 0; i < keys.length; i++) {
+                                var k = keys[i];
+                                if (k.indexOf("__reactContainer") === 0 || k.indexOf("__reactFiber") === 0) {
+                                    cb();
+                                    return;
+                                }
+                            }
+                        }
+                        if (++tries > 240) return; // ~12s, then give up quietly
+                        setTimeout(poll, 50);
+                    })();
+                }
+
+                function annotateIdentity(id) {
+                    try {
+                        window.__RBX_IDENTITY = id;
+                    } catch (e) {}
+                    if (!id || !id.name) return;
+                    whenHydrated(function () {
+                        try {
+                            var line = document.getElementById("loading-experience-creator");
+                            if (line) {
+                                line.hidden = false;
+                                line.textContent = "Signed in as @" + id.name;
+                            }
+                        } catch (e) {}
+                    });
+                }
+
+                var q = new URLSearchParams(location.search);
+                var placeId = q.get("placeId") || q.get("placeid") || "";
+                var guest = q.has("guest");
+
+                /*
+                 * Is the local backend actually running?
+                 *
+                 * Every /api/* route lives in server.js. When this page is
+                 * served by a plain static file server (python3 -m http.server,
+                 * `npx serve`, VS Code Live Server, `http-server`) those routes
+                 * 404 -- which is exactly the "GET /api/engine-version 404"
+                 * seen in DevTools. Without the backend the engine version
+                 * cannot be resolved and no session can exist, so say that
+                 * plainly instead of spraying 404s and then being bounced to
+                 * roblox.com/login by the engine's own auth probe.
+                 */
+                function backendMissing() {
+                    var splash = document.getElementById("rbx-splash");
+                    if (splash && splash.parentNode) splash.parentNode.removeChild(splash);
+                    var wrap = document.createElement("div");
+                    wrap.style.cssText = "position:fixed;inset:0;z-index:2147483647;display:flex;align-items:center;justify-content:center;background:#0b0e14;font-family:system-ui,-apple-system,'Segoe UI',sans-serif;color:#e8ecf4;padding:24px";
+                    wrap.innerHTML =
+                        '<div style="max-width:560px;width:100%;background:#161a23;border:1px solid #2a3140;border-radius:14px;padding:28px;box-shadow:0 24px 60px rgba(0,0,0,.55)">' +
+                          '<div style="font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:#ff8fa0;font-weight:700;margin-bottom:10px">Backend not running</div>' +
+                          '<h1 style="margin:0 0 12px;font-size:21px;font-weight:700;line-height:1.3">This page needs <code style="font-size:19px">server.js</code></h1>' +
+                          '<p style="margin:0 0 14px;color:#aab4c6;font-size:13.5px;line-height:1.65">' +
+                            'You are viewing these files through a plain static file server. That can only hand out files \u2014 it cannot sign you in, resolve the engine version, or join a game.' +
+                          '</p>' +
+                          '<p style="margin:0 0 8px;color:#8f9aad;font-size:12.5px">Stop that server, then run:</p>' +
+                          '<pre style="margin:0 0 16px;background:#0b0e14;border:1px solid #2a3140;border-radius:8px;padding:12px 14px;font-size:12.5px;color:#9ff0c4;overflow:auto">cd "RobloxWeb-modded copy 2"\n./start.sh</pre>' +
+                          '<p style="margin:0;color:#8f9aad;font-size:12.5px">Then open <b style="color:#cfd6e4">http://localhost:3000/</b> \u2014 not a <code>file://</code> URL and not another port.</p>' +
+                        '</div>';
+                    (document.body || document.documentElement).appendChild(wrap);
+                }
+
+                function probeBackend() {
+                    // Two attempts: a single dropped connection (server just
+                    // restarted, socket reset) must not be reported to the user
+                    // as "the backend is not running".
+                    function once() {
+                        return fetch("/api/health", { cache: "no-store" })
+                            .then(function (r) { return r.ok ? r.json() : null; })
+                            .then(function (j) { return j && j.ok ? j : null; })
+                            .catch(function () { return null; });
+                    }
+                    return once().then(function (health) {
+                        if (health) return health;
+                        return new Promise(function (res) { setTimeout(res, 400); }).then(once);
+                    });
+                }
+
+                probeBackend().then(function (health) {
+                    if (!health) { backendMissing(); return; }
+                    if (health.buildId !== "2026-11-03-join-diagnostics") {
+                        showBlocked(
+                            "Restart the updated Roblox Web server",
+                            "This page is updated, but the server process handling game requests is an older build.",
+                            "Stop the running server with Ctrl+C, then run ./start.sh from the updated RobloxWeb folder and reload this page.",
+                            "SERVER_BUILD_MISMATCH"
+                        );
+                        var mismatch = document.getElementById("rbx-preflight-block");
+                        var details = mismatch && mismatch.querySelector("p");
+                        if (details) {
+                            details.textContent = "Page expects join-diagnostics; port " + (location.port || "80") +
+                                " answered with " + (health.buildId || "an older server without a build ID") +
+                                (health.root ? " from " + health.root : "") +
+                                (health.pid ? " (PID " + health.pid + ")" : "") + ".";
+                        }
+                        return;
+                    }
+                    if (guest) { boot(); return; }
+                    fetch("/api/auth/verify", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    cache: "no-store",
+                    body: JSON.stringify({ placeId: placeId })
+                })
+                    .then(function (r) { return r.json().catch(function () { return {}; }); })
+                    .then(function (j) {
+                        if (!j || !j.authenticated) {
+                            showBlocked(
+                                "Roblox does not recognise a session",
+                                (j && j.error) || "No Roblox account is attached to this client.",
+                                (j && j.remedy) || "Sign in on the login screen first.",
+                                (j && j.code) || "NO_SESSION"
+                            );
+                            return;
+                        }
+                        annotateIdentity(j.identity);
+                        var p = j.place || {};
+                        var pf = p.preflight || {};
+                        if (pf.unavailable) {
+                            // join-game-metadata is gone (404). We cannot know
+                            // the playability ahead of time, so boot and let the
+                            // join itself decide; the error panel explains it.
+                            console.warn("[preflight] playability preflight unavailable (endpoint retired)");
+                        }
+                        // A metadata/preflight result must not locally block a
+                        // place. Attempt every numeric place and let the actual
+                        // gamejoin response decide whether Roblox authorizes it.
+                        if (pf.playabilityStatus && pf.playabilityStatus !== "Ok") {
+                            console.warn("[preflight] Roblox reported " + pf.playabilityStatus + "; attempting the place anyway");
+                        }
+                        boot();
+                    })
+                    .catch(function (e) {
+                        console.warn("[preflight] verify failed", e);
+                        boot();
+                    });
+                });
+            })();
+        </script>
+        <script>
+            /*
+              Turn the engine's opaque join failure into something actionable.
+
+              When a join is refused the engine fills the loading screen's error
+              panel with a generic line ("Not authorized to join this
+              experience", "Error Code: 524") and a numeric status. Neither says
+              *why*. The panel is static markup inside #__next, so we watch it
+              for the moment React un-hides it, then ask the server to re-run
+              the same authorization checks and append a one-line diagnosis:
+              which account the session belongs to, which experience this is,
+              what gamejoin says about it, and what to do next.
+
+              Nothing is written until the panel is actually shown, so this can
+              never disturb hydration.
+            */
+            (function () {
+                "use strict";
+
+                function wire() {
+                var placeId = "";
+                try { placeId = new URLSearchParams(location.search).get("placeId") || ""; } catch (e) {}
+
+                var done = false;
+                function enrich() {
+                    if (done) return;
+                    // Re-query every tick: React may replace the panel node
+                    // during hydration, so a reference captured earlier can go
+                    // stale and never report the change.
+                    var p = document.querySelector(".loading-error-panel") ||
+                        document.getElementById("loading-error-panel");
+                    if (!p || p.hasAttribute("hidden")) return;
+                    done = true;
+                    fetch("/api/join/diagnose?placeId=" + encodeURIComponent(placeId), { cache: "no-store" })
+                        .then(function (r) { return r.json(); })
+                        .then(function (j) {
+                            var bits = [];
+                            if (j.identity) bits.push("signed in as @" + j.identity.name);
+                            if (j.place && j.place.name) {
+                                bits.push(j.place.name + (j.place.creator && j.place.creator.name ? " by " + j.place.creator.name : ""));
+                            }
+                            if (j.place && j.place.ownedByYou === false) {
+                                var creatorType = String(j.place.creator && j.place.creator.type || "").toLowerCase();
+                                if (creatorType === "group") {
+                                    bits.push("Web Play access: group owner, editor, early tester, or play tester");
+                                } else if (creatorType === "user") {
+                                    bits.push("Web Play beta: individually owned games are owner-only");
+                                } else {
+                                    bits.push("this game is not owned by the signed-in account; check Web Play tester access");
+                                }
+                            }
+                            if (j.engineRequest) {
+                                var x = j.engineRequest;
+                                var initial = x.initial || {};
+                                var finalResult = x.final || {};
+                                var requestLine = "proxy request: cookie " + (x.cookieAttached ? "present" : "missing") +
+                                    ", CSRF " + (x.csrfAttached ? "present" : "missing") +
+                                    ", Roblox status " + (initial.robloxStatus == null ? "unknown" : initial.robloxStatus);
+                                if (x.sessionRefreshHttpStatus != null) {
+                                    requestLine += "; session refresh HTTP " + x.sessionRefreshHttpStatus +
+                                        (x.sessionCookieRotated ? " (cookie updated)" : "");
+                                }
+                                if (x.csrfCookieAligned != null) {
+                                    requestLine += x.csrfCookieAligned ? "; session/token aligned" : "; session/token alignment unknown or mismatched";
+                                }
+                                if (x.retries && x.retries.length) {
+                                    var lastRetry = x.retries[x.retries.length - 1];
+                                    requestLine += "; " + lastRetry.cookieSource + " retry returned " +
+                                        (lastRetry.response.robloxStatus == null ? "HTTP " + lastRetry.response.httpStatus : "status " + lastRetry.response.robloxStatus);
+                                } else if (x.browserRefreshSucceeded === false) {
+                                    requestLine += "; browser session refresh failed";
+                                }
+                                if (finalResult.joinScriptIssued) requestLine += "; Roblox issued a join ticket";
+                                bits.push(requestLine);
+                            }
+                            if (j.join && j.join.playabilityStatus) bits.push("playability " + j.join.playabilityStatus);
+                            if (j.verdict && j.verdict !== "OK") bits.push("diagnosis " + j.verdict);
+                            var line = bits.join(" \u00b7 ");
+                            if (j.remedy) line += (line ? " \u2014 " : "") + j.remedy;
+                            if (!line) return;
+
+                            /*
+                             * Render into our own node appended to <body>, not
+                             * into the engine's panel: the LoadingScreen is a
+                             * React component and re-renders on the second
+                             * failure (gui-service), which would wipe anything
+                             * we wrote inside its subtree.
+                             */
+                            var card = document.getElementById("rbx-join-diagnosis");
+                            if (!card) {
+                                card = document.createElement("div");
+                                card.id = "rbx-join-diagnosis";
+                                card.setAttribute("role", "status");
+                                card.style.cssText = [
+                                    "position:fixed", "left:50%", "bottom:24px",
+                                    "transform:translateX(-50%)", "z-index:2147483646",
+                                    "max-width:min(560px,calc(100vw - 32px))",
+                                    "background:#161a23", "border:1px solid #2a3140",
+                                    "border-radius:12px", "padding:14px 16px",
+                                    "box-shadow:0 18px 48px rgba(0,0,0,.55)",
+                                    "font-family:system-ui,-apple-system,'Segoe UI',sans-serif",
+                                    "font-size:12.5px", "line-height:1.6", "color:#aab4c6",
+                                ].join(";");
+                                (document.body || document.documentElement).appendChild(card);
+                            }
+                            card.innerHTML = "";
+                            var head = document.createElement("div");
+                            head.textContent = "Join diagnosis";
+                            head.style.cssText = "font-size:10.5px;letter-spacing:.12em;text-transform:uppercase;color:#8f9aad;font-weight:700;margin-bottom:6px";
+                            var bodyEl = document.createElement("div");
+                            bodyEl.textContent = line;
+                            bodyEl.style.cssText = "color:#cfd6e4";
+                            card.appendChild(head);
+                            card.appendChild(bodyEl);
+                        })
+                        .catch(function () {});
+                }
+
+                // Poll rather than observe: the panel's visibility is toggled by
+                // the engine's React tree, and a MutationObserver bound to a
+                // node that hydration later replaces never fires. 250ms for
+                // three minutes costs nothing and always sees the final state.
+                var ticks = 0;
+                var timer = setInterval(function () {
+                    enrich();
+                    if (done || ++ticks > 720) clearInterval(timer);
+                }, 250);
+                enrich();
+                // Backstop for background tabs, where setInterval is throttled
+                // hard: watch the whole document for any `hidden` change.
+                try {
+                    new MutationObserver(enrich).observe(document.documentElement, {
+                        attributes: true,
+                        subtree: true,
+                        attributeFilter: ["hidden"],
+                    });
+                } catch (e) {}
+                console.log("[diagnose] join-failure watcher armed");
+                }
+
+                // This script sits in <head>, where the body (and therefore the
+                // error panel) does not exist yet.
+                if (document.readyState === "loading") {
+                    document.addEventListener("DOMContentLoaded", wire, { once: true });
+                } else {
+                    wire();
+                }
+            })();
+        </script>
+    </head>
+<body><div id="__next"><div id="input-container"><textarea id="input-textarea" autoCapitalize="off"></textarea><input id="input-input" autoCapitalize="off"/></div><div class="emscripten_border"><canvas class="emscripten" id="canvas" tabindex="-1"></canvas><div id="loading-overlay" role="dialog" aria-label="Loading Roblox" aria-busy="true"><div class="loading-background" aria-hidden="true"><img id="loading-background-image" alt="" crossorigin="anonymous"/></div><div class="loading-dark-gradient" aria-hidden="true"></div><section class="loading-info-card" aria-labelledby="loading-experience-title"><div id="loading-icon-shell" aria-hidden="true"><img id="loading-experience-icon" alt="" crossorigin="anonymous"/></div><h1 id="loading-experience-title">Joining experience</h1><div class="loading-creator-line"><span id="loading-experience-creator" hidden=""></span><span id="loading-verified-badge" role="img" aria-label="Verified creator" title="Verified creator" hidden=""></span></div></section><section class="loading-error-panel" role="alertdialog" aria-modal="true" aria-labelledby="loading-error-title" aria-describedby="loading-error-message loading-error-code" hidden=""><header class="loading-error-header"><h1 id="loading-error-title">Join Error</h1></header><div class="loading-error-divider" aria-hidden="true"></div><div class="loading-error-body"><div class="loading-error-copy"><p id="loading-error-message"></p><p id="loading-error-code"></p></div><button id="loading-error-leave" type="button">Leave</button></div></section><div id="status" role="status" aria-live="polite">Preparing Roblox…</div><div class="loading-status-spinner" aria-hidden="true"></div><button id="loading-cancel" type="button" aria-label="Cancel loading" title="Cancel"></button></div></div><div class="emscripten" hidden=""><span id="server"></span><span id="proxyenabled"></span></div></div><script id="__NEXT_DATA__" type="application/json">{"props":{"pageProps":{}},"page":"/games/start","query":{},"buildId":"oZ8_CY33a0v3QcT39qLGB","assetPrefix":"/038e4bd621bee962e64ed84fac16608407267adc","nextExport":true,"autoExport":true,"isFallback":false,"scriptLoader":[]}</script></body></html>

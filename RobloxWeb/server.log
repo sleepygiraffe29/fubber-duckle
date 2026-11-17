@@ -1,0 +1,28 @@
+[server] http://localhost:3000/
+[server] build: 2026-11-03-gpu-required-test
+[server] isolation headers: COOP same-origin / COEP credentialless
+[server] same-origin API proxy: /api/p?url=<encoded url>
+[server] session: none yet — use the login screen
+[auth] no same-browser session yet — sign in at roblox.com, then reload
+(node:6597) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+[patch] engine worker stub rewritten (proxy shim injected)
+[patch] engine worker stub rewritten (proxy shim injected)
+[patch] engine worker stub rewritten (proxy shim injected)
+[patch] engine worker stub rewritten (proxy shim injected)
+[patch] engine worker stub rewritten (proxy shim injected)
+[patch] engine worker stub rewritten (proxy shim injected)
+[patch] engine worker stub rewritten (proxy shim injected)
+[patch] engine worker stub rewritten (proxy shim injected)
+[patch] engine worker stub rewritten (proxy shim injected)
+[patch] engine worker stub rewritten (proxy shim injected)
+[patch] engine worker stub rewritten (proxy shim injected)
+[patch] engine worker stub rewritten (proxy shim injected)
+[auth] stored a Roblox .ROBLOSECURITY rotation from Set-Cookie
+[join] -> POST https://gamejoin.roblox.com/v1/join-game body={"placeId":17261351778,"gameJoinAttemptId":"992bf72d-e792-4dad-bc03-bf42d6bc7ae6"} cookie=session(1207b) csrf=yes
+[patch] engine worker stub rewritten (proxy shim injected)
+[join] <- 200 application/json; charset=utf-8 {"jobId":"JoinPlace=17261351778;","status":0,"statusData":null,"joinScriptUrl":null,"authenticationUrl":null,"authenticationTicket":null,"message":null,"joinScript":null,"joinTicket":null,"queuePosition":0}
+[override] https://gameinternationalization.roblox.com/v1/user-localization-settings/player-choice/5905074229 -> local (user 5905074229)
+[auth] stored a Roblox .ROBLOSECURITY rotation from Set-Cookie
+[join] -> POST https://gamejoin.roblox.com/v1/join-game body={"placeId":17261351778,"gameJoinAttemptId":"992bf72d-e792-4dad-bc03-bf42d6bc7ae6"} cookie=session(1207b) csrf=yes
+[join] <- 200 application/json; charset=utf-8 {"jobId":"71184c70-2a48-47d2-944a-05a7f6f780cf","status":2,"statusData":null,"joinScriptUrl":"https://assetgame.roblox.com/Game/Join.ashx?ticketVersion=2&ticket={\"UserId\"%3a1517500825%2c\"UserName\"%3a\"mlica2201\"%2c\"DisplayName\"%3a\"Sleepygiraffe29\"%2c\"CharacterFetchUrl\"%3a\"https%3a%2f%2fapi.roblox.com%2fv1.1%2favatar-fetch%2f%3fplaceId%3d17261351778%26userId%3d1517500825\"%2c\"GameId\"%3a\"71184c70-2a48-47d2-944a-05a7f6f780cf\"%2c\"PlaceId\"%3a17261351778%2c\"UniverseId\"%3a5905074229%2c\"ServerId\"%3a1122793%2c\"ServerPort\"%3a56406%2c\"IsTeleport\"%3afalse%2c\"FollowUserId\"%3anul
