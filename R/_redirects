@@ -1,0 +1,10 @@
+# Static route fallbacks (Netlify / Cloudflare Pages).
+# Everything is a real file, so only the bare root needs help.
+/            /index.html    200
+/index       /index.html    200
+/client      /client.html   200
+
+# Engine assets (Next.js assetPrefix) live on play.roblox.com. On a static host
+# there is no server.js proxy, so rewrite them to Roblox. This also covers the
+# lazily-imported chunks, whose publicPath is relative to this origin.
+/038e4bd621bee962e64ed84fac16608407267adc/*  https://play.roblox.com/038e4bd621bee962e64ed84fac16608407267adc/:splat  200
